@@ -1,14 +1,8 @@
-// migrate-imports.ts
-// This script automatically adds '.ts' extensions to all relative imports
-// in a specified directory of TypeScript files, addressing the TS2835 error.
-
 import { promises as fs } from 'fs';
 import process from 'process';
 import { processDirectory } from './migrate-imports.ts';
 
-/**
- * The main function to orchestrate the import migration process.
- */
+
 async function main() {
   const [srcDir] = process.argv.slice(2);
 
