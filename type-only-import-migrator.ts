@@ -21,6 +21,11 @@ interface ImportStatement {
 
 class TypeOnlyImportMigrator {
   private errors: ImportError[] = [];
+  private basePath: string;
+
+  constructor(basePath: string = process.cwd()) {
+    this.basePath = path.resolve(basePath);
+  }
 
   /**
    * Parse TSC output to extract TS1484 errors
@@ -37,9 +42,10 @@ class TypeOnlyImportMigrator {
       
       if (errorMatch) {
         const [, filePath, lineNum, columnNum, typeName] = errorMatch;
+        const resolvedPath = this.resolveFilePath(filePath.trim());
         
         errors.push({
-          filePath: filePath.trim(),
+          filePath: resolvedPath,
           line: parseInt(lineNum),
           column: parseInt(columnNum),
           typeName: typeName.trim(),
@@ -50,6 +56,18 @@ class TypeOnlyImportMigrator {
     
     this.errors = errors;
     return errors;
+  }
+
+  /**
+   * Resolve file path relative to base path
+   */
+  private resolveFilePath(filePath: string): string {
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    
+    // If the path is relative, resolve it against the base path
+    return path.resolve(this.basePath, filePath);
   }
 
   /**
@@ -149,6 +167,12 @@ class TypeOnlyImportMigrator {
    */
   async fixImportsInFile(filePath: string): Promise<void> {
     try {
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        console.warn(`⚠️  File not found: ${filePath}`);
+        return;
+      }
+
       // Read file content
       const fileContent = await fs.promises.readFile(filePath, 'utf-8');
       const lines = fileContent.split('\n');
@@ -208,7 +232,7 @@ class TypeOnlyImportMigrator {
       const updatedContent = updatedLines.join('\n');
       await fs.promises.writeFile(filePath, updatedContent, 'utf-8');
       
-      console.log(`✅ Fixed imports in: ${filePath}`);
+      console.log(`✅ Fixed imports in: ${path.relative(this.basePath, filePath)}`);
       
     } catch (error) {
       console.error(`❌ Error processing file ${filePath}:`, error);
@@ -219,7 +243,7 @@ class TypeOnlyImportMigrator {
    * Main method to migrate all imports based on TSC output
    */
   async migrateImports(tscOutput: string): Promise<void> {
-    console.log('🔍 Parsing TSC output for TS1484 errors...');
+    console.log(`🔍 Parsing TSC output for TS1484 errors... (Base path: ${this.basePath})`);
     
     // Parse errors
     const errors = this.parseTscOutput(tscOutput);
@@ -234,9 +258,14 @@ class TypeOnlyImportMigrator {
     const filesToFix = this.getFilesWithErrors();
     console.log(`Files to fix: ${filesToFix.length}`);
     
+    // Show which files will be processed
+    filesToFix.forEach(file => {
+      console.log(`  - ${path.relative(this.basePath, file)}`);
+    });
+    
     // Fix each file
     for (const filePath of filesToFix) {
-      console.log(`🔧 Processing: ${filePath}`);
+      console.log(`🔧 Processing: ${path.relative(this.basePath, filePath)}`);
       await this.fixImportsInFile(filePath);
     }
     
@@ -246,6 +275,9 @@ class TypeOnlyImportMigrator {
 
 // Usage example
 async function main() {
+  // Get base path from command line arguments or use current directory
+  const basePath = process.argv[2] || process.cwd();
+  
   const tscOutput = `
 src/web/routes/api/v1/pms/endpoint.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
 
@@ -273,7 +305,7 @@ src/web/routes/api/v1/pms/endpoint.ts:2:63 - error TS1484: 'FastifyRequest' is a
                                                                 ~~~~~~~~~~~~~~
   `;
 
-  const migrator = new TypeOnlyImportMigrator();
+  const migrator = new TypeOnlyImportMigrator(basePath);
   await migrator.migrateImports(tscOutput);
 }
 
