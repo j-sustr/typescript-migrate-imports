@@ -19,7 +19,7 @@ interface ImportStatement {
   }[];
 }
 
-class TypeOnlyImportMigrator {
+export class TypeOnlyImportMigrator {
   private errors: ImportError[] = [];
   private basePath: string;
 
