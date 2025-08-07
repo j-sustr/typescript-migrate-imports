@@ -3,8 +3,8 @@
 // in a specified directory of TypeScript files, addressing the TS2835 error.
 
 import { promises as fs } from 'fs';
-import path from 'path';
 import process from 'process';
+import { processDirectory } from './migrate-imports';
 
 /**
  * The main function to orchestrate the import migration process.
@@ -14,7 +14,7 @@ async function main() {
 
   if (!srcDir) {
     console.error('Please provide a source directory as an argument.');
-    console.error('Usage: ts-node migrate-imports.ts <path/to/your/src>');
+    console.error('Usage: node main.ts <path/to/your/src>');
     process.exit(1);
   }
 
