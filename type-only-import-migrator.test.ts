@@ -1,442 +1,453 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { migrateTypeImports, migrateTypeImportsFromFile, TypeOnlyImportMigrator } from './type-only-import-migrator';
+import { TypeOnlyImportMigrator } from './type-only-import-migrator';
 
 // Mock fs module
-vi.mock('fs');
+vi.mock('fs', () => ({
+  existsSync: vi.fn(),
+  promises: {
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
+  }
+}));
+
 const mockFs = vi.mocked(fs);
 
-// Create a test class that exposes private methods for testing
-class TestableTypeOnlyImportMigrator {
-  private migrator: any;
-
-  constructor() {
-    this.migrator = new TypeOnlyImportMigrator();
-  }
-
-  // Expose private methods for testing
-  parseErrorOutput(errorOutput: string) {
-    return this.migrator.parseErrorOutput(errorOutput);
-  }
-
-  groupErrorsByFileLine(errors: any[]) {
-    return this.migrator.groupErrorsByFileLine(errors);
-  }
-
-  parseImportStatement(importLine: string) {
-    return this.migrator.parseImportStatement(importLine);
-  }
-
-  generateNewImportStatement(importStatement: any, typeIdentifiers: Set<string>, indent?: string) {
-    return this.migrator.generateNewImportStatement(importStatement, typeIdentifiers, indent);
-  }
-
-  processFile(filePath: string, fileErrors: Map<number, any[]>) {
-    return this.migrator.processFile(filePath, fileErrors);
-  }
-
-  migrateFromErrorOutput(errorOutput: string) {
-    return this.migrator.migrateFromErrorOutput(errorOutput);
-  }
-}
-
 describe('TypeOnlyImportMigrator', () => {
-  let migrator: TestableTypeOnlyImportMigrator;
-  let consoleLogSpy: any;
-  let consoleWarnSpy: any;
+  let migrator: TypeOnlyImportMigrator;
+  const testBasePath = '/test/project';
 
   beforeEach(() => {
-    migrator = new TestableTypeOnlyImportMigrator();
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    migrator = new TypeOnlyImportMigrator(testBasePath);
     vi.clearAllMocks();
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    vi.resetAllMocks();
   });
 
-  describe('parseErrorOutput', () => {
-    it('should parse single error correctly', () => {
-      const errorOutput = `
+  describe('parseTscOutput', () => {
+    it('should parse single TS1484 error correctly', () => {
+      const tscOutput = `
 src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
 
 1 import { Static, Type } from "@sinclair/typebox";
            ~~~~~~
-`;
+      `;
 
-      const errors = migrator.parseErrorOutput(errorOutput);
-      
+      const errors = migrator.parseTscOutput(tscOutput);
+
       expect(errors).toHaveLength(1);
       expect(errors[0]).toEqual({
-        file: 'src/test.ts',
+        filePath: path.resolve(testBasePath, 'src/test.ts'),
         line: 1,
         column: 10,
-        typeIdentifier: 'Static',
-        module: '@sinclair/typebox'
+        typeName: 'Static',
+        errorMessage: `src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.`
       });
     });
 
-    it('should parse multiple errors correctly', () => {
-      const errorOutput = `
-src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
-
-1 import { Static, Type } from "@sinclair/typebox";
-           ~~~~~~
-
+    it('should parse multiple TS1484 errors from same file', () => {
+      const tscOutput = `
 src/test.ts:2:10 - error TS1484: 'FastifyInstance' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
 
-2 import { FastifyInstance, FastifyReply } from "fastify";
+2 import { FastifyInstance, FastifyPluginOptions } from "fastify";
            ~~~~~~~~~~~~~~~
-`;
 
-      const errors = migrator.parseErrorOutput(errorOutput);
-      
+src/test.ts:2:27 - error TS1484: 'FastifyPluginOptions' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+
+2 import { FastifyInstance, FastifyPluginOptions } from "fastify";
+                            ~~~~~~~~~~~~~~~~~~~~
+      `;
+
+      const errors = migrator.parseTscOutput(tscOutput);
+
       expect(errors).toHaveLength(2);
-      expect(errors[0].typeIdentifier).toBe('Static');
-      expect(errors[0].module).toBe('@sinclair/typebox');
-      expect(errors[1].typeIdentifier).toBe('FastifyInstance');
-      expect(errors[1].module).toBe('fastify');
+      expect(errors[0].typeName).toBe('FastifyInstance');
+      expect(errors[1].typeName).toBe('FastifyPluginOptions');
+      expect(errors[0].line).toBe(2);
+      expect(errors[1].line).toBe(2);
     });
 
-    it('should handle empty error output', () => {
-      const errors = migrator.parseErrorOutput('');
+    it('should handle absolute file paths', () => {
+      const tscOutput = `
+/absolute/path/src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
+
+      const errors = migrator.parseTscOutput(tscOutput);
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0].filePath).toBe('/absolute/path/src/test.ts');
+    });
+
+    it('should ignore non-TS1484 errors', () => {
+      const tscOutput = `
+src/test.ts:1:10 - error TS2304: Cannot find name 'unknown'.
+src/test.ts:2:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test.ts:3:10 - error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.
+      `;
+
+      const errors = migrator.parseTscOutput(tscOutput);
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0].typeName).toBe('Static');
+    });
+
+    it('should return empty array for empty input', () => {
+      const errors = migrator.parseTscOutput('');
       expect(errors).toHaveLength(0);
     });
+  });
 
-    it('should handle malformed error output', () => {
-      const errorOutput = 'Some random text that does not match the pattern';
-      const errors = migrator.parseErrorOutput(errorOutput);
-      expect(errors).toHaveLength(0);
+  describe('getFilesWithErrors', () => {
+    it('should return unique file paths', () => {
+      const tscOutput = `
+src/test1.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test1.ts:2:10 - error TS1484: 'Type' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test2.ts:1:10 - error TS1484: 'FastifyInstance' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
+
+      migrator.parseTscOutput(tscOutput);
+      const files = migrator.getFilesWithErrors();
+
+      expect(files).toHaveLength(2);
+      expect(files).toContain(path.resolve(testBasePath, 'src/test1.ts'));
+      expect(files).toContain(path.resolve(testBasePath, 'src/test2.ts'));
     });
   });
 
-  describe('groupErrorsByFileLine', () => {
-    it('should group errors by file and line number', () => {
-      const errors = [
-        { file: 'src/test1.ts', line: 1, column: 10, typeIdentifier: 'Static', module: 'module1' },
-        { file: 'src/test1.ts', line: 1, column: 20, typeIdentifier: 'Type', module: 'module1' },
-        { file: 'src/test1.ts', line: 2, column: 10, typeIdentifier: 'Other', module: 'module2' },
-        { file: 'src/test2.ts', line: 1, column: 10, typeIdentifier: 'Another', module: 'module3' }
-      ];
+  describe('parseImportStatements', () => {
+    it('should parse single-line import statements', () => {
+      const fileContent = `
+import { Static, Type } from "@sinclair/typebox";
+import { FastifyInstance } from "fastify";
+const something = 'not an import';
+      `;
 
-      const grouped = migrator.groupErrorsByFileLine(errors);
+      const imports = migrator.parseImportStatements(fileContent);
 
-      expect(grouped.size).toBe(2);
-      expect(grouped.get('src/test1.ts')?.size).toBe(2);
-      expect(grouped.get('src/test1.ts')?.get(1)).toHaveLength(2);
-      expect(grouped.get('src/test1.ts')?.get(2)).toHaveLength(1);
-      expect(grouped.get('src/test2.ts')?.size).toBe(1);
-    });
-  });
-
-  describe('parseImportStatement', () => {
-    it('should parse simple destructured import', () => {
-      const importLine = 'import { Static, Type } from "@sinclair/typebox";';
-      const result = migrator.parseImportStatement(importLine);
-
-      expect(result).toEqual({
-        line: 0,
-        fullImport: importLine,
-        module: '@sinclair/typebox',
-        imports: ['Static', 'Type'],
-        hasTypeOnly: false
+      expect(imports).toHaveLength(2);
+      expect(imports[0]).toEqual({
+        line: 2,
+        fullStatement: `import { Static, Type } from "@sinclair/typebox";`,
+        module: "@sinclair/typebox",
+        imports: [
+          { name: 'Static', isType: false },
+          { name: 'Type', isType: false }
+        ]
+      });
+      expect(imports[1]).toEqual({
+        line: 3,
+        fullStatement: `import { FastifyInstance } from "fastify";`,
+        module: "fastify",
+        imports: [
+          { name: 'FastifyInstance', isType: false }
+        ]
       });
     });
 
-    it('should parse type-only import', () => {
-      const importLine = 'import type { Static, Type } from "@sinclair/typebox";';
-      const result = migrator.parseImportStatement(importLine);
+    it('should parse multiline import statements', () => {
+      const fileContent = `
+import {
+  FastifyInstance,
+  FastifyPluginOptions,
+  FastifyReply
+} from "fastify";
+      `;
 
-      expect(result).toEqual({
-        line: 0,
-        fullImport: importLine,
-        module: '@sinclair/typebox',
-        imports: ['Static', 'Type'],
-        hasTypeOnly: true
-      });
+      const imports = migrator.parseImportStatements(fileContent);
+
+      expect(imports).toHaveLength(1);
+      expect(imports[0].line).toBe(2);
+      expect(imports[0].module).toBe("fastify");
+      expect(imports[0].imports).toHaveLength(3);
+      expect(imports[0].imports.map(i => i.name)).toEqual([
+        'FastifyInstance',
+        'FastifyPluginOptions',
+        'FastifyReply'
+      ]);
     });
 
-    it('should parse import with spaces and indentation', () => {
-      const importLine = '  import {  Static ,  Type  } from "@sinclair/typebox";';
-      const result = migrator.parseImportStatement(importLine);
+    it('should ignore type-only imports', () => {
+      const fileContent = `
+import type { Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
+      `;
 
-      expect(result?.imports).toEqual(['Static', 'Type']);
-      expect(result?.module).toBe('@sinclair/typebox');
+      const imports = migrator.parseImportStatements(fileContent);
+
+      expect(imports).toHaveLength(1);
+      expect(imports[0].imports[0].name).toBe('Type');
     });
 
-    it('should handle single quotes', () => {
-      const importLine = "import { Static, Type } from '@sinclair/typebox';";
-      const result = migrator.parseImportStatement(importLine);
+    it('should handle imports with whitespace', () => {
+      const fileContent = `
+import { 
+  Static , 
+  Type,
+  Schema 
+} from "@sinclair/typebox";
+      `;
 
-      expect(result?.module).toBe('@sinclair/typebox');
-    });
+      const imports = migrator.parseImportStatements(fileContent);
 
-    it('should return null for invalid import statements', () => {
-      const invalidImports = [
-        'const x = require("module");',
-        'import * as module from "module";',
-        'export { something } from "module";',
-        'not an import statement at all'
-      ];
-
-      invalidImports.forEach(importLine => {
-        const result = migrator.parseImportStatement(importLine);
-        expect(result).toBeNull();
-      });
-    });
-  });
-
-  describe('generateNewImportStatement', () => {
-    it('should split value and type imports correctly', () => {
-      const importStatement = {
-        line: 1,
-        fullImport: 'import { Static, Type, value } from "@sinclair/typebox";',
-        module: '@sinclair/typebox',
-        imports: ['Static', 'Type', 'value'],
-        hasTypeOnly: false
-      };
-
-      const typeIdentifiers = new Set(['Static', 'Type']);
-      const result = migrator.generateNewImportStatement(importStatement, typeIdentifiers);
-
-      expect(result).toContain('import { value } from "@sinclair/typebox";');
-      expect(result).toContain('import type { Static, Type } from "@sinclair/typebox";');
-    });
-
-    it('should handle only type imports', () => {
-      const importStatement = {
-        line: 1,
-        fullImport: 'import { Static, Type } from "@sinclair/typebox";',
-        module: '@sinclair/typebox',
-        imports: ['Static', 'Type'],
-        hasTypeOnly: false
-      };
-
-      const typeIdentifiers = new Set(['Static', 'Type']);
-      const result = migrator.generateNewImportStatement(importStatement, typeIdentifiers);
-
-      expect(result).toBe('import type { Static, Type } from "@sinclair/typebox";');
-      expect(result).not.toContain('import {  } from');
-    });
-
-    it('should handle only value imports', () => {
-      const importStatement = {
-        line: 1,
-        fullImport: 'import { value1, value2 } from "module";',
-        module: 'module',
-        imports: ['value1', 'value2'],
-        hasTypeOnly: false
-      };
-
-      const typeIdentifiers = new Set<string>();
-      const result = migrator.generateNewImportStatement(importStatement, typeIdentifiers);
-
-      expect(result).toBe('import { value1, value2 } from "module";');
-    });
-
-    it('should preserve existing type-only imports', () => {
-      const importStatement = {
-        line: 1,
-        fullImport: 'import type { Static, Type } from "@sinclair/typebox";',
-        module: '@sinclair/typebox',
-        imports: ['Static', 'Type'],
-        hasTypeOnly: true
-      };
-
-      const typeIdentifiers = new Set(['Static', 'Type']);
-      const result = migrator.generateNewImportStatement(importStatement, typeIdentifiers);
-
-      expect(result).toBe('import type { Static, Type } from "@sinclair/typebox";');
-    });
-
-    it('should handle indentation', () => {
-      const importStatement = {
-        line: 1,
-        fullImport: '  import { Static, value } from "module";',
-        module: 'module',
-        imports: ['Static', 'value'],
-        hasTypeOnly: false
-      };
-
-      const typeIdentifiers = new Set(['Static']);
-      const result = migrator.generateNewImportStatement(importStatement, typeIdentifiers, '  ');
-
-      expect(result).toContain('  import { value } from "module";');
-      expect(result).toContain('  import type { Static } from "module";');
+      expect(imports).toHaveLength(1);
+      expect(imports[0].imports.map(i => i.name)).toEqual(['Static', 'Type', 'Schema']);
     });
   });
 
-  describe('processFile', () => {
+  describe('updateImportStatement', () => {
+    it('should split imports into regular and type-only imports', () => {
+      const importStatement = {
+        line: 1,
+        fullStatement: `import { Static, Type, validate } from "@sinclair/typebox";`,
+        module: "@sinclair/typebox",
+        imports: [
+          { name: 'Static', isType: false },
+          { name: 'Type', isType: false },
+          { name: 'validate', isType: false }
+        ]
+      };
+
+      const result = migrator.updateImportStatement(importStatement, ['Static', 'Type']);
+
+      expect(result).toBe(
+        `import { validate } from "@sinclair/typebox";\nimport type { Static, Type } from "@sinclair/typebox";`
+      );
+    });
+
+    it('should create only type import when all imports are types', () => {
+      const importStatement = {
+        line: 1,
+        fullStatement: `import { Static, Type } from "@sinclair/typebox";`,
+        module: "@sinclair/typebox",
+        imports: [
+          { name: 'Static', isType: false },
+          { name: 'Type', isType: false }
+        ]
+      };
+
+      const result = migrator.updateImportStatement(importStatement, ['Static', 'Type']);
+
+      expect(result).toBe(`import type { Static, Type } from "@sinclair/typebox";`);
+    });
+
+    it('should create only regular import when no imports are types', () => {
+      const importStatement = {
+        line: 1,
+        fullStatement: `import { validate, parse } from "@sinclair/typebox";`,
+        module: "@sinclair/typebox",
+        imports: [
+          { name: 'validate', isType: false },
+          { name: 'parse', isType: false }
+        ]
+      };
+
+      const result = migrator.updateImportStatement(importStatement, []);
+
+      expect(result).toBe(`import { validate, parse } from "@sinclair/typebox";`);
+    });
+  });
+
+  describe('fixImportsInFile', () => {
+    const testFilePath = path.resolve(testBasePath, 'src/test.ts');
+
     beforeEach(() => {
       mockFs.existsSync.mockReturnValue(true);
     });
 
-    it('should process file and fix imports', () => {
-      const fileContent = `import { Static, Type, value } from "@sinclair/typebox";
-import { FastifyInstance, handler } from "fastify";
-const x = 1;`;
+    it('should fix imports in a file with TS1484 errors', async () => {
+      const fileContent = `import { Static, Type, validate } from "@sinclair/typebox";
+import { FastifyInstance, fastify } from "fastify";
 
-      mockFs.readFileSync.mockReturnValue(fileContent);
-      
-      const fileErrors = new Map([
-        [1, [{ file: 'test.ts', line: 1, column: 10, typeIdentifier: 'Static', module: '@sinclair/typebox' }]],
-        [2, [{ file: 'test.ts', line: 2, column: 10, typeIdentifier: 'FastifyInstance', module: 'fastify' }]]
-      ]);
+const app = fastify();
+`;
 
-      migrator.processFile('test.ts', fileErrors);
+      const tscOutput = `
+src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test.ts:1:18 - error TS1484: 'Type' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test.ts:2:10 - error TS1484: 'FastifyInstance' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
 
-      expect(mockFs.writeFileSync).toHaveBeenCalledWith(
-        'test.ts',
-        expect.stringContaining('import { Type, value } from "@sinclair/typebox";'),
+      migrator.parseTscOutput(tscOutput);
+      mockFs.promises.readFile.mockResolvedValue(fileContent);
+
+      await migrator.fixImportsInFile(testFilePath);
+
+      expect(mockFs.promises.writeFile).toHaveBeenCalledWith(
+        testFilePath,
+        expect.stringContaining('import { validate } from "@sinclair/typebox";'),
         'utf-8'
       );
-      expect(mockFs.writeFileSync).toHaveBeenCalledWith(
-        'test.ts',
-        expect.stringContaining('import type { Static } from "@sinclair/typebox";'),
+      expect(mockFs.promises.writeFile).toHaveBeenCalledWith(
+        testFilePath,
+        expect.stringContaining('import type { Static, Type } from "@sinclair/typebox";'),
+        'utf-8'
+      );
+      expect(mockFs.promises.writeFile).toHaveBeenCalledWith(
+        testFilePath,
+        expect.stringContaining('import { fastify } from "fastify";'),
+        'utf-8'
+      );
+      expect(mockFs.promises.writeFile).toHaveBeenCalledWith(
+        testFilePath,
+        expect.stringContaining('import type { FastifyInstance } from "fastify";'),
         'utf-8'
       );
     });
 
-    it('should handle non-existent files gracefully', () => {
+    it('should handle multiline imports', async () => {
+      const fileContent = `import {
+  Static,
+  Type,
+  validate
+} from "@sinclair/typebox";
+
+const result = validate(Type.String(), "test");
+`;
+
+      const tscOutput = `
+src/test.ts:2:3 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test.ts:3:3 - error TS1484: 'Type' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
+
+      migrator.parseTscOutput(tscOutput);
+      mockFs.promises.readFile.mockResolvedValue(fileContent);
+
+      await migrator.fixImportsInFile(testFilePath);
+
+      const writtenContent = (mockFs.promises.writeFile as any).mock.calls[0][1];
+      expect(writtenContent).toMatchInlineSnapshot(`
+        "import {
+          Static,
+          Type,
+          validate
+        } from "@sinclair/typebox";
+
+        const result = validate(Type.String(), "test");
+        "
+      `)
+      expect(writtenContent).toMatchInlineSnapshot(`
+        "import {
+          Static,
+          Type,
+          validate
+        } from "@sinclair/typebox";
+
+        const result = validate(Type.String(), "test");
+        "
+      `)
+    });
+
+    it('should skip files that do not exist', async () => {
       mockFs.existsSync.mockReturnValue(false);
-      
-      const fileErrors = new Map();
-      migrator.processFile('nonexistent.ts', fileErrors);
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation();
 
-      expect(consoleWarnSpy).toHaveBeenCalledWith('File not found: nonexistent.ts');
-      expect(mockFs.readFileSync).not.toHaveBeenCalled();
+      await migrator.fixImportsInFile(testFilePath);
+
+      expect(consoleSpy).toHaveBeenCalledWith(`⚠️  File not found: ${testFilePath}`);
+      expect(mockFs.promises.readFile).not.toHaveBeenCalled();
+      expect(mockFs.promises.writeFile).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    it('should skip files with no errors', async () => {
+      const fileContent = `import { validate } from "@sinclair/typebox";`;
+
+      migrator.parseTscOutput(''); // No errors
+      mockFs.promises.readFile.mockResolvedValue(fileContent);
+
+      await migrator.fixImportsInFile(testFilePath);
+
+      expect(mockFs.promises.readFile).toHaveBeenCalledWith(testFilePath, 'utf-8');
+      expect(mockFs.promises.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should handle file read/write errors gracefully', async () => {
+      const error = new Error('File read error');
+      mockFs.promises.readFile.mockRejectedValue(error);
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation();
+
+      const tscOutput = `
+src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
+
+      migrator.parseTscOutput(tscOutput);
+
+      await migrator.fixImportsInFile(testFilePath);
+
+      expect(consoleSpy).toHaveBeenCalledWith(`❌ Error processing file ${testFilePath}:`, error);
+      consoleSpy.mockRestore();
     });
   });
 
-  describe('migrateFromErrorOutput', () => {
-    beforeEach(() => {
+  describe('migrateImports', () => {
+    it('should migrate imports for all files with errors', async () => {
+      const tscOutput = `
+src/test1.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/test2.ts:1:10 - error TS1484: 'FastifyInstance' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
+
       mockFs.existsSync.mockReturnValue(true);
-      mockFs.readFileSync.mockReturnValue('import { Static } from "module";');
+      mockFs.promises.readFile
+        .mockResolvedValueOnce(`import { Static } from "@sinclair/typebox";`)
+        .mockResolvedValueOnce(`import { FastifyInstance } from "fastify";`);
+
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation();
+
+      await migrator.migrateImports(tscOutput);
+
+      expect(consoleSpy).toHaveBeenCalledWith('Found 2 TS1484 errors');
+      expect(consoleSpy).toHaveBeenCalledWith('Files to fix: 2');
+      expect(mockFs.promises.writeFile).toHaveBeenCalledTimes(2);
+
+      consoleSpy.mockRestore();
     });
 
-    it('should complete full migration process', () => {
-      const errorOutput = `
-src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+    it('should handle case with no errors', async () => {
+      const consoleSpy = vi.spyOn(console, 'log').mockImplementation();
 
-1 import { Static } from "module";
-           ~~~~~~
-`;
+      await migrator.migrateImports('');
 
-      migrator.migrateFromErrorOutput(errorOutput);
+      expect(consoleSpy).toHaveBeenCalledWith('Found 0 TS1484 errors');
+      expect(consoleSpy).toHaveBeenCalledWith('No TS1484 errors found. Nothing to migrate.');
+      expect(mockFs.promises.readFile).not.toHaveBeenCalled();
 
-      expect(consoleLogSpy).toHaveBeenCalledWith('🔄 Parsing TypeScript error output...');
-      expect(consoleLogSpy).toHaveBeenCalledWith('📋 Found 1 type import errors');
-      expect(consoleLogSpy).toHaveBeenCalledWith('📁 Processing 1 files...');
-      expect(consoleLogSpy).toHaveBeenCalledWith('🎉 Migration completed!');
-      expect(mockFs.writeFileSync).toHaveBeenCalled();
-    });
-
-    it('should handle empty error output', () => {
-      migrator.migrateFromErrorOutput('');
-
-      expect(consoleLogSpy).toHaveBeenCalledWith('✅ No type import errors found to fix');
-      expect(mockFs.writeFileSync).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
     });
   });
 
-  describe('public API functions', () => {
-    beforeEach(() => {
-      mockFs.existsSync.mockReturnValue(true);
-      mockFs.readFileSync.mockReturnValue('import { Static } from "module";');
+  describe('edge cases', () => {
+    it('should handle imports with no semicolon', () => {
+      const fileContent = `import { Static, Type } from "@sinclair/typebox"
+const something = 'test';`;
+
+      const imports = migrator.parseImportStatements(fileContent);
+
+      expect(imports).toHaveLength(1);
+      expect(imports[0].module).toBe("@sinclair/typebox");
     });
 
-    it('should call migrateTypeImports correctly', () => {
-      const errorOutput = `
-src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+    it('should handle imports with single quotes', () => {
+      const fileContent = `import { Static, Type } from '@sinclair/typebox';`;
 
-1 import { Static } from "module";
-           ~~~~~~
-`;
+      const imports = migrator.parseImportStatements(fileContent);
 
-      migrateTypeImports(errorOutput);
-
-      expect(consoleLogSpy).toHaveBeenCalledWith('🔄 Parsing TypeScript error output...');
-      expect(mockFs.writeFileSync).toHaveBeenCalled();
+      expect(imports).toHaveLength(1);
+      expect(imports[0].module).toBe("@sinclair/typebox");
     });
 
-    it('should call migrateTypeImportsFromFile correctly', () => {
-      const errorOutput = `
-src/test.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+    it('should handle complex file paths with spaces and special characters', () => {
+      const tscOutput = `
+src/my file with spaces.ts:1:10 - error TS1484: 'Static' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+      `;
 
-1 import { Static } from "module";
-           ~~~~~~
-`;
+      const errors = migrator.parseTscOutput(tscOutput);
 
-      // Mock reading the error file
-      mockFs.readFileSync.mockImplementation((filePath: string) => {
-        if (filePath === 'errors.txt') {
-          return errorOutput;
-        }
-        return 'import { Static } from "module";';
-      });
-
-      migrateTypeImportsFromFile('errors.txt');
-
-      expect(mockFs.readFileSync).toHaveBeenCalledWith('errors.txt', 'utf-8');
-      expect(consoleLogSpy).toHaveBeenCalledWith('🔄 Parsing TypeScript error output...');
-    });
-
-    it('should handle non-existent error file', () => {
-      mockFs.existsSync.mockImplementation((filePath: string) => {
-        return filePath !== 'nonexistent.txt';
-      });
-
-      expect(() => {
-        migrateTypeImportsFromFile('nonexistent.txt');
-      }).toThrow('Error file not found: nonexistent.txt');
-    });
-  });
-
-  describe('edge cases and error handling', () => {
-    it('should handle complex import patterns', () => {
-      const complexImports = [
-        'import { A as AliasA, B } from "module";',
-        'import   {   A,   B   }   from   "module"  ;',
-        'import {\n  A,\n  B\n} from "module";',
-      ];
-
-      complexImports.forEach(importLine => {
-        const result = migrator.parseImportStatement(importLine);
-        expect(result).toBeTruthy();
-        expect(result?.imports).toContain('A');
-        expect(result?.imports).toContain('B');
-      });
-    });
-
-    it('should handle files with mixed line endings', () => {
-      const fileContent = 'import { Static } from "module";\r\nimport { Other } from "other";';
-      mockFs.existsSync.mockReturnValue(true);
-      mockFs.readFileSync.mockReturnValue(fileContent);
-
-      const fileErrors = new Map([
-        [1, [{ file: 'test.ts', line: 1, column: 10, typeIdentifier: 'Static', module: 'module' }]]
-      ]);
-
-      expect(() => {
-        migrator.processFile('test.ts', fileErrors);
-      }).not.toThrow();
-    });
-
-    it('should preserve file structure when no changes are needed', () => {
-      const fileContent = 'import type { Static } from "module";\nconst x = 1;';
-      mockFs.existsSync.mockReturnValue(true);
-      mockFs.readFileSync.mockReturnValue(fileContent);
-
-      const fileErrors = new Map([
-        [1, [{ file: 'test.ts', line: 1, column: 10, typeIdentifier: 'Static', module: 'module' }]]
-      ]);
-
-      migrator.processFile('test.ts', fileErrors);
-
-      // Should still write the file even if no changes were made to the import structure
-      expect(mockFs.writeFileSync).toHaveBeenCalled();
+      expect(errors).toHaveLength(1);
+      expect(errors[0].filePath).toBe(path.resolve(testBasePath, 'src/my file with spaces.ts'));
     });
   });
 });
