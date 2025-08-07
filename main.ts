@@ -4,7 +4,7 @@
 
 import { promises as fs } from 'fs';
 import process from 'process';
-import { processDirectory } from './migrate-imports';
+import { processDirectory } from './migrate-imports.ts';
 
 /**
  * The main function to orchestrate the import migration process.
